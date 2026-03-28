@@ -1,0 +1,21 @@
+[project]
+name = "mamba"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "boto3>=1.42.77",
+    "dotenv>=0.9.9",
+    "fastapi>=0.117.1",
+    "langchain>=1.2.13",
+    "langchain-google-genai>=4.2.1",
+    "langchain-ollama>=1.0.1",
+    "ollama>=0.6.1",
+    "openai>=2.30.0",
+    "pillow>=12.1.1",
+    "pymango>=0.1.1",
+    "pymongo>=4.16.0",
+    "python-multipart>=0.0.20",
+    "uvicorn>=0.36.0",
+]

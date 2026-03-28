@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>JUBISmartPV | Ticketing and RCA Submission Portal</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Plus+Jakarta+Sans:wght@500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="brand-block">
+        <div class="brand-mark">JPV</div>
+        <div>
+          <p class="brand-name">JUBISmartPV</p>
+          <p class="brand-subtitle">Ticketing and RCA Submission Portal</p>
+        </div>
+      </div>
+
+      <div class="sidebar-card">
+        <p class="sidebar-label">Submission standards</p>
+        <ul class="sidebar-list">
+          <li>Use the exact request ID received from the connected application.</li>
+          <li>Describe the issue with enough detail for triage and RCA assessment.</li>
+          <li>Photos are optional, but they help accelerate review.</li>
+          <li>Select both the routing path and the required submission type.</li>
+        </ul>
+      </div>
+
+      <div class="sidebar-card accent-card">
+        <p class="sidebar-label">Company</p>
+        <div class="mini-stats">
+          <div>
+            <strong>JGL and JDI</strong>
+          </div>
+        </div>
+      </div>
+    </aside>
+
+    <main class="content">
+      <header class="topbar">
+        <div>
+          <p class="section-kicker">Case Intake</p>
+          <h1>Create a new ticket and RCA submission</h1>
+          <p class="section-copy">Submit the request reference, issue details, routing path, and submission type.</p>
+        </div>
+        <div class="topbar-status" id="backendStatus">
+          <span class="status-dot"></span>
+          <span>Checking backend...</span>
+        </div>
+      </header>
+
+      <section class="workspace">
+        <form id="issueForm" class="issue-form" novalidate>
+          <div class="section-head">
+            <h2>Submission details</h2>
+            <p>Complete the mandatory fields and submit the case.</p>
+          </div>
+
+          <div class="field-grid three-up">
+            <div class="field">
+              <label for="requestId">Request ID</label>
+              <input id="requestId" name="requestId" type="text" placeholder="Enter request ID" autocomplete="off" required>
+            </div>
+
+            <div class="field">
+              <label for="userEmail">Submitter Email</label>
+              <input id="userEmail" name="userEmail" type="email" placeholder="name@company.com" autocomplete="email" required>
+            </div>
+
+            <div class="field">
+              <label for="requestType">Request Type</label>
+              <select id="requestType" name="requestType" class="styled-select" required>
+                <option value="Existing Change" selected>Existing Change</option>
+                <option value="New Feature">New Feature Request</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="field-grid media-grid">
+            <div class="field">
+              <div class="field-row">
+                <label for="issuePhotos">Supporting photos</label>
+                <span class="field-badge">Optional</span>
+              </div>
+              <label for="issuePhotos" class="upload-box sleek-upload">
+                <input id="issuePhotos" name="issuePhotos" type="file" accept="image/*" multiple>
+                <span class="upload-icon">+</span>
+                <span class="upload-title">Upload images</span>
+              </label>
+            </div>
+
+            <div class="field description-field">
+              <label for="issueDescription">Issue description</label>
+              <textarea
+                id="issueDescription"
+                name="issueDescription"
+                rows="6"
+                placeholder="Describe the issue, impact, and relevant case details."
+                required
+              ></textarea>
+            </div>
+          </div>
+
+          <div class="field">
+            <div id="previewGrid" class="preview-grid" aria-live="polite"></div>
+          </div>
+
+          <div class="selection-grid">
+            <div class="field">
+              <div class="section-head compact">
+                <h2>Routing path</h2>
+              </div>
+              <div class="choice-grid two-up compact-choices" role="radiogroup" aria-labelledby="primaryChoiceLabel">
+                <span id="primaryChoiceLabel" class="sr-only">Primary routing path</span>
+
+                <label class="choice-card compact-card">
+                  <input type="radio" name="primaryChoice" value="JDI" required>
+                  <span class="choice-title">JDI</span>
+                </label>
+
+                <label class="choice-card compact-card">
+                  <input type="radio" name="primaryChoice" value="JGL" required>
+                  <span class="choice-title">JGL</span>
+                </label>
+              </div>
+            </div>
+
+            <div class="field">
+              <div class="section-head compact">
+                <h2>Submission type</h2>
+              </div>
+              <div class="choice-grid three-up compact-choices" role="radiogroup" aria-labelledby="reviewChoiceLabel">
+                <span id="reviewChoiceLabel" class="sr-only">Submission type</span>
+
+                <label class="choice-card compact-card">
+                  <input type="radio" name="reviewType" value="PSUR" required>
+                  <span class="choice-title">PSUR</span>
+                </label>
+
+                <label class="choice-card compact-card">
+                  <input type="radio" name="reviewType" value="PADER" required>
+                  <span class="choice-title">PADER</span>
+                </label>
+
+                <label class="choice-card compact-card">
+                  <input type="radio" name="reviewType" value="Literature Review" required>
+                  <span class="choice-title">Literature Review</span>
+                </label>
+              </div>
+            </div>
+          </div>
+
+          <div class="actions">
+            <p id="formMessage" class="form-message" aria-live="polite"></p>
+            <button type="submit" class="submit-button">Submit and analyze</button>
+          </div>
+        </form>
+
+        <aside id="submissionCard" class="summary-panel" hidden>
+          <div class="section-head compact">
+            <h2>Submission preview</h2>
+            <p>Review the captured details.</p>
+          </div>
+          <div id="submissionSummary" class="submission-summary"></div>
+        </aside>
+      </section>
+    </main>
+  </div>
+
+  <script src="./script.js"></script>
+</body>
+</html>
