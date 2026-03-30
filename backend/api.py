@@ -1,18 +1,33 @@
 import asyncio
+import hashlib
+import logging
+from datetime import datetime, timedelta, timezone
+from typing import Any
 
 from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
 from pymongo.errors import DuplicateKeyError
 
 from backend.db import (
     append_ticket_status_event,
     ensure_ticket_indexes,
     find_ticket_by_request_id,
+    get_tickets_collection,
     insert_ticket_document,
     ping_mongo,
     update_ticket_fields,
 )
+from backend.embedder import (
+    build_embedding_record,
+    build_failed_embedding_record,
+    build_pending_embedding_record,
+    build_vector_search_pipeline,
+    embed_text,
+)
 from backend.ingestion_ticket import analyze_ticket
+from backend.opencode_orchestrator import execute_rag_flow
 from backend.s3_upload import (
     get_s3_client,
     upload_issue_photos,
@@ -35,18 +50,59 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+logger = logging.getLogger(__name__)
+DEPENDENCY_STATUS: dict[str, dict[str, str]] = {
+    "mongo": {"status": "unknown", "detail": "Not checked yet"},
+    "s3": {"status": "unknown", "detail": "Not checked yet"},
+}
+
+
+class VectorSearchRequest(BaseModel):
+    query: str = Field(..., min_length=1)
+    limit: int = Field(default=5, ge=1, le=25)
+    review_type: str | None = None
+
 
 @app.on_event("startup")
 async def startup_checks() -> None:
-    # Validate data stores and ensure indexes before serving requests.
-    await asyncio.to_thread(ping_mongo)
-    await asyncio.to_thread(ensure_ticket_indexes)
-    await asyncio.to_thread(get_s3_client)
+    # Validate external dependencies, but do not abort the API process if one is unavailable.
+    try:
+        await asyncio.to_thread(ping_mongo)
+        await asyncio.to_thread(ensure_ticket_indexes)
+        DEPENDENCY_STATUS["mongo"] = {"status": "ok", "detail": "MongoDB reachable"}
+    except Exception as exc:
+        DEPENDENCY_STATUS["mongo"] = {"status": "error", "detail": str(exc)}
+        logger.exception("MongoDB startup check failed")
+
+    try:
+        await asyncio.to_thread(get_s3_client)
+        DEPENDENCY_STATUS["s3"] = {"status": "ok", "detail": "S3 client initialized"}
+    except Exception as exc:
+        DEPENDENCY_STATUS["s3"] = {"status": "error", "detail": str(exc)}
+        logger.exception("S3 startup check failed")
 
 
 @app.get("/health")
-async def health_check() -> dict[str, str]:
-    return {"status": "ok"}
+async def health_check() -> dict[str, object]:
+    overall_status = "ok" if all(item["status"] == "ok" for item in DEPENDENCY_STATUS.values()) else "degraded"
+    return {"status": overall_status, "dependencies": DEPENDENCY_STATUS}
+
+
+def _require_dependency(name: str) -> None:
+    dependency = DEPENDENCY_STATUS.get(name, {})
+    if dependency.get("status") != "ok":
+        raise HTTPException(status_code=503, detail=f"{name.upper()} unavailable: {dependency.get('detail', 'Unknown error')}")
+
+
+@app.get("/api/tickets/{request_id}")
+async def get_ticket(request_id: str) -> dict[str, object]:
+    _require_dependency("mongo")
+    ticket = await asyncio.to_thread(find_ticket_by_request_id, request_id.strip())
+    if not ticket:
+        raise HTTPException(status_code=404, detail="Ticket not found")
+    if ticket.get("_id") is not None:
+        ticket["_id"] = str(ticket["_id"])
+    return {"success": True, "ticket": jsonable_encoder(ticket)}
 
 
 def _default_storage_summary(route: str) -> dict[str, object]:
@@ -57,6 +113,244 @@ def _default_storage_summary(route: str) -> dict[str, object]:
         "inputArtifact": None,
         "outputArtifact": None,
         "logArtifacts": [],
+    }
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _digest_text(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _build_issue_fingerprint(ticket_payload: dict[str, str]) -> str:
+    fingerprint_source = "|".join(
+        [
+            ticket_payload.get("primaryChoice", "").strip().lower(),
+            ticket_payload.get("reviewType", "").strip().lower(),
+            ticket_payload.get("requestType", "").strip().lower(),
+            ticket_payload.get("issueDescription", "").strip().lower(),
+        ]
+    )
+    return _digest_text(fingerprint_source)
+
+
+def _normalize_review_type(value: str | None) -> str | None:
+    if not value or not value.strip():
+        return None
+
+    normalized = value.strip().lower()
+    review_type_map = {
+        "psur": "PSUR",
+        "pader": "PADER",
+        "lit review": "Literature Review",
+        "literature review": "Literature Review",
+    }
+    if normalized not in review_type_map:
+        raise HTTPException(status_code=400, detail="review_type must be PSUR, PADER, or Literature Review")
+    return review_type_map[normalized]
+
+
+def _build_vector_search_filter(search_request: VectorSearchRequest) -> dict[str, Any]:
+    filter_clauses: list[dict[str, Any]] = [
+        {"embeddings.summary.status": "completed"},
+        {"updatedAt": {"$gte": _utc_now() - timedelta(days=60)}},
+    ]
+
+    normalized_review_type = _normalize_review_type(search_request.review_type)
+    if normalized_review_type:
+        filter_clauses.append({"embeddings.summary.metadata.reviewType": normalized_review_type})
+
+    return {"$and": filter_clauses}
+
+
+def _build_workflow_state() -> dict[str, object]:
+    return {
+        "rag": {
+            "eligible": False,
+            "status": "not_started",
+            "decision": None,
+            "evaluatedAt": None,
+        },
+        "dedup": {
+            "eligible": False,
+            "status": "not_started",
+            "matchedRecordId": None,
+            "evaluatedAt": None,
+        },
+        "rca": {
+            "eligible": False,
+            "status": "not_applicable",
+            "queuedAt": None,
+            "startedAt": None,
+            "completedAt": None,
+            "summary": None,
+        },
+    }
+
+
+def _build_initial_ticket_document(
+    ticket_payload: dict[str, str],
+    received_image_count: int,
+    storage_summary: dict[str, object],
+) -> dict[str, object]:
+    now = _utc_now()
+    issue_description = ticket_payload["issueDescription"]
+    route = ticket_payload["primaryChoice"]
+
+    return {
+        "requestId": ticket_payload["requestId"],
+        "userEmail": ticket_payload["userEmail"],
+        "requestType": ticket_payload["requestType"],
+        "primaryChoice": route,
+        "reviewType": ticket_payload["reviewType"],
+        "status": "processing",
+        "currentStep": "received",
+        "statusMessage": "Request received and queued",
+        "documentType": "incident_intake",
+        "pipelineVersion": "v2",
+        "form": ticket_payload,
+        "intake": {
+            "requestId": ticket_payload["requestId"],
+            "submitterEmail": ticket_payload["userEmail"],
+            "requestType": ticket_payload["requestType"],
+            "routingPath": route,
+            "submissionType": ticket_payload["reviewType"],
+            "issueDescription": issue_description,
+            "issueDescriptionHash": _digest_text(issue_description.strip()),
+            "issueFingerprint": _build_issue_fingerprint(ticket_payload),
+            "receivedImageCount": received_image_count,
+            "submittedAt": now,
+        },
+        "storage": storage_summary,
+        "imagePayloadUrls": [],
+        "artifactUrls": {
+            "problems": [],
+            "input": [],
+            "output": [],
+            "logs": [],
+        },
+        "analysis": {
+            "model": None,
+            "imageCount": 0,
+            "structured": None,
+            "rawOutput": None,
+            "embeddingText": None,
+            "embeddingModel": None,
+            "triageSignals": None,
+            "analyzedAt": None,
+        },
+        "embeddings": {
+            "summary": build_pending_embedding_record(ticket_payload),
+        },
+        "triage": {
+            "summary": None,
+            "errorType": None,
+            "systemContext": route,
+            "pageContext": None,
+            "errorCode": None,
+            "severity": None,
+            "severityWeight": None,
+            "impactScope": None,
+            "impactAssessment": None,
+            "preliminaryAssessment": None,
+            "relatedIssues": [],
+            "imageEvidence": [],
+            "occurrenceHint": None,
+            "dataGaps": [],
+        },
+        "workflow": _build_workflow_state(),
+        "rca": {
+            "status": "not_applicable",
+            "eligible": False,
+            "result": None,
+        },
+        "statusHistory": [
+            {
+                "status": "processing",
+                "step": "received",
+                "message": "Request received and queued",
+                "at": now,
+            }
+        ],
+    }
+
+
+def _build_analysis_update(analysis: dict[str, object], storage_summary: dict[str, object], image_bytes_list: list[bytes]) -> dict[str, object]:
+    structured = analysis.get("structured", {})
+    triage_signals = structured.get("triage_signals", {}) if isinstance(structured, dict) else {}
+    now = _utc_now()
+    embedding_record = analysis.get("embedding", {}) if isinstance(analysis.get("embedding"), dict) else {}
+
+    return {
+        "status": "completed",
+        "currentStep": "completed",
+        "statusMessage": "Submission processed successfully",
+        "receivedImageCount": len(image_bytes_list),
+        "storage": storage_summary,
+        "imagePayloadUrls": _build_artifact_urls(storage_summary)["problems"],
+        "artifactUrls": _build_artifact_urls(storage_summary),
+        "analysis": {
+            "model": analysis.get("model"),
+            "imageCount": analysis.get("imageCount", 0),
+            "structured": structured,
+            "rawOutput": analysis.get("rawOutput", ""),
+            "embeddingText": structured.get("embedding_text") if isinstance(structured, dict) else None,
+            "embeddingModel": embedding_record.get("model"),
+            "triageSignals": triage_signals,
+            "analyzedAt": now,
+        },
+        "embeddings": {
+            "summary": {
+                **embedding_record,
+                "embeddedAt": now,
+            }
+        },
+        "triage": {
+            "summary": structured.get("short_summary") if isinstance(structured, dict) else None,
+            "structuredProblem": structured.get("structured_problem") if isinstance(structured, dict) else None,
+            "errorType": structured.get("error_type") if isinstance(structured, dict) else None,
+            "systemContext": structured.get("system_context") if isinstance(structured, dict) else None,
+            "pageContext": structured.get("page_context") if isinstance(structured, dict) else None,
+            "errorCode": structured.get("error_code") if isinstance(structured, dict) else None,
+            "severity": structured.get("severity") if isinstance(structured, dict) else None,
+            "severityWeight": structured.get("severity_weight") if isinstance(structured, dict) else None,
+            "impactScope": structured.get("impact_scope") if isinstance(structured, dict) else None,
+            "impactAssessment": structured.get("impact_assessment") if isinstance(structured, dict) else None,
+            "preliminaryAssessment": structured.get("preliminary_assessment") if isinstance(structured, dict) else None,
+            "relatedIssues": structured.get("related_issues", []) if isinstance(structured, dict) else [],
+            "imageEvidence": structured.get("image_evidence", []) if isinstance(structured, dict) else [],
+            "occurrenceHint": structured.get("occurrence_hint") if isinstance(structured, dict) else None,
+            "dataGaps": structured.get("data_gaps", []) if isinstance(structured, dict) else [],
+        },
+        "workflow": {
+            "rag": {
+                "eligible": True,
+                "status": "pending",
+                "decision": None,
+                "evaluatedAt": None,
+            },
+            "dedup": {
+                "eligible": False,
+                "status": "waiting_for_rag",
+                "matchedRecordId": None,
+                "evaluatedAt": None,
+            },
+            "rca": {
+                "eligible": False,
+                "status": "waiting_for_rag",
+                "queuedAt": None,
+                "startedAt": None,
+                "completedAt": None,
+                "summary": "Structured record uploaded. Waiting for the RAG agent to decide reuse vs RCA.",
+            },
+        },
+        "rca": {
+            "status": "waiting_for_rag",
+            "eligible": False,
+            "result": None,
+        },
     }
 
 
@@ -105,6 +399,15 @@ async def process_ticket_background(
         if not analysis.get("structured"):
             raise RuntimeError("AI analysis did not return structured output")
 
+        structured = analysis.get("structured", {})
+        if not isinstance(structured, dict):
+            raise RuntimeError("AI analysis returned invalid structured output")
+
+        try:
+            analysis["embedding"] = await asyncio.to_thread(build_embedding_record, ticket_payload, structured)
+        except Exception as embedding_exc:
+            analysis["embedding"] = build_failed_embedding_record(ticket_payload, structured, embedding_exc)
+
         await asyncio.to_thread(
             append_ticket_status_event,
             request_id,
@@ -117,6 +420,7 @@ async def process_ticket_background(
             "model": analysis.get("model"),
             "imageCount": analysis.get("imageCount", 0),
             "structured": analysis.get("structured", {}),
+            "embedding": analysis.get("embedding", {}),
             "rawOutput": analysis.get("rawOutput", ""),
         }
         output_artifact = await asyncio.to_thread(
@@ -136,34 +440,15 @@ async def process_ticket_background(
             "Submission processed successfully",
         )
         storage_summary["logArtifacts"] = [success_log]
-        artifact_urls = _build_artifact_urls(storage_summary)
-        image_payload_urls = artifact_urls["problems"]
 
         await asyncio.to_thread(
             update_ticket_fields,
             request_id,
-            {
-                "status": "completed",
-                "currentStep": "completed",
-                "statusMessage": "Submission processed successfully",
-                "receivedImageCount": len(image_bytes_list),
-                "storage": storage_summary,
-                "imagePayloadUrls": image_payload_urls,
-                "artifactUrls": artifact_urls,
-                "ai": {
-                    "model": analysis.get("model"),
-                    "imageCount": analysis.get("imageCount", 0),
-                    "summary": analysis.get("structured", {}),
-                    "rawOutput": analysis.get("rawOutput", ""),
-                },
-            },
+            _build_analysis_update(analysis, storage_summary, image_bytes_list),
         )
         await asyncio.to_thread(
-            append_ticket_status_event,
+            execute_rag_flow,
             request_id,
-            "completed",
-            "completed",
-            "Submission processed successfully",
         )
     except Exception as exc:
         try:
@@ -215,6 +500,9 @@ async def ingest_ticket(
     reviewType: str = Form(...),
     issuePhotos: list[UploadFile] | None = File(None),
 ) -> dict:
+    _require_dependency("mongo")
+    _require_dependency("s3")
+
     request_id = requestId.strip()
     user_email = userEmail.strip()
     request_type = requestType.strip()
@@ -258,30 +546,11 @@ async def ingest_ticket(
     }
 
     initial_storage_summary = _default_storage_summary(route)
-
-    initial_ticket_document = {
-        **ticket_payload,
-        "status": "processing",
-        "currentStep": "received",
-        "statusMessage": "Request received and queued",
-        "form": ticket_payload,
-        "receivedImageCount": len(image_bytes_list),
-        "storage": initial_storage_summary,
-        "imagePayloadUrls": [],
-        "artifactUrls": {
-            "problems": [],
-            "input": [],
-            "output": [],
-            "logs": [],
-        },
-        "statusHistory": [
-            {
-                "status": "processing",
-                "step": "received",
-                "message": "Request received and queued",
-            }
-        ],
-    }
+    initial_ticket_document = _build_initial_ticket_document(
+        ticket_payload,
+        len(image_bytes_list),
+        initial_storage_summary,
+    )
 
     try:
         ticket_id = await asyncio.to_thread(insert_ticket_document, initial_ticket_document)
@@ -386,4 +655,31 @@ async def ingest_ticket(
         "ticketId": ticket_id,
         "requestId": request_id,
         "status": "processing",
+    }
+
+
+@app.post("/api/tickets/search/vector")
+async def search_tickets_vector(search_request: VectorSearchRequest) -> dict[str, object]:
+    _require_dependency("mongo")
+    metadata_filters = _build_vector_search_filter(search_request)
+
+    try:
+        query_vector = await asyncio.to_thread(embed_text, search_request.query)
+        pipeline = build_vector_search_pipeline(
+            query_vector,
+            limit=search_request.limit,
+            metadata_filters=metadata_filters or None,
+        )
+        results = await asyncio.to_thread(
+            lambda: list(get_tickets_collection().aggregate(pipeline))
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Vector search failed: {exc}") from exc
+
+    return {
+        "success": True,
+        "query": search_request.query,
+        "filters": metadata_filters,
+        "count": len(results),
+        "results": jsonable_encoder(results),
     }

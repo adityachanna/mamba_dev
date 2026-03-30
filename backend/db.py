@@ -8,7 +8,10 @@ from dotenv import load_dotenv
 from pymongo import ASCENDING, DESCENDING, MongoClient
 from pymongo.collection import Collection
 from pymongo.errors import DuplicateKeyError
+from pymongo.operations import SearchIndexModel
 from pymongo.server_api import ServerApi
+
+from backend.embedder import get_vector_dimensions, get_vector_index_definition
 
 load_dotenv(Path(__file__).with_name(".env"))
 
@@ -62,6 +65,45 @@ def ensure_ticket_indexes() -> None:
     collection.create_index([("requestId", ASCENDING)], unique=True, name="request_id_unique")
     collection.create_index([("createdAt", DESCENDING)], name="created_at_desc")
     collection.create_index([("primaryChoice", ASCENDING), ("createdAt", DESCENDING)], name="route_created_desc")
+    collection.create_index([("status", ASCENDING), ("updatedAt", DESCENDING)], name="status_updated_desc")
+    collection.create_index([("currentStep", ASCENDING), ("updatedAt", DESCENDING)], name="step_updated_desc")
+    collection.create_index([("triage.systemContext", ASCENDING), ("status", ASCENDING)], name="system_status_idx")
+    collection.create_index([("triage.severity", ASCENDING), ("updatedAt", DESCENDING)], name="severity_updated_desc")
+    collection.create_index([("rca.status", ASCENDING), ("updatedAt", DESCENDING)], name="rca_status_updated_desc")
+    collection.create_index([("intake.issueFingerprint", ASCENDING)], name="issue_fingerprint_idx")
+    collection.create_index([("embeddings.summary.status", ASCENDING), ("updatedAt", DESCENDING)], name="embedding_status_updated_desc")
+    collection.create_index([("embeddings.summary.metadata.project", ASCENDING), ("updatedAt", DESCENDING)], name="embedding_project_updated_desc")
+    collection.create_index([("embeddings.summary.metadata.requestType", ASCENDING), ("updatedAt", DESCENDING)], name="embedding_request_type_updated_desc")
+    collection.create_index([("embeddings.summary.metadata.reviewType", ASCENDING), ("updatedAt", DESCENDING)], name="embedding_review_type_updated_desc")
+    collection.create_index([("embeddings.summary.metadata.errorType", ASCENDING), ("updatedAt", DESCENDING)], name="embedding_error_type_updated_desc")
+    collection.create_index([("embeddings.summary.metadata.severity", ASCENDING), ("updatedAt", DESCENDING)], name="embedding_severity_updated_desc")
+    ensure_ticket_vector_index(collection)
+
+
+def ensure_ticket_vector_index(collection: Collection | None = None) -> None:
+    if collection is None:
+        collection = get_tickets_collection()
+    index_definition = get_vector_index_definition(get_vector_dimensions())
+
+    try:
+        existing_indexes = list(collection.list_search_indexes())
+    except Exception:
+        return
+
+    if any(index.get("name") == index_definition["name"] for index in existing_indexes):
+        return
+
+    try:
+        collection.create_search_index(
+            SearchIndexModel(
+                definition=index_definition["definition"],
+                name=index_definition["name"],
+                type=index_definition["type"],
+            )
+        )
+    except Exception:
+        # Search index management is Atlas-specific and may be unavailable in some environments.
+        return
 
 
 def find_ticket_by_request_id(request_id: str) -> dict | None:
