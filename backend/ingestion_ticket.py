@@ -1,5 +1,6 @@
 import base64
 import json
+import logging
 import os
 from io import BytesIO
 from pathlib import Path
@@ -10,6 +11,7 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from PIL import Image, UnidentifiedImageError
 
 load_dotenv(Path(__file__).with_name(".env"))
+logger = logging.getLogger(__name__)
 
 MODEL_NAME = os.getenv("GEMINI_MODEL", os.getenv("OLLAMA_MODEL", "gemini-3.1-flash-lite-preview"))
 MAX_IMAGE_SIZE = (1024, 1024)
@@ -105,7 +107,8 @@ def build_ticket_prompt(ticket_data: dict[str, str], image_count: int) -> str:
     return (
         "You are a product support intake analyst producing machine-consumable incident records.\n"
         "Your output will be stored in MongoDB and used for structured triage, search, and downstream review.\n"
-        "Be concise, factual, deterministic, and extract as much concrete incident detail as the evidence supports.\n\n"
+        "Be concise, factual, deterministic, and extract as much concrete incident detail as the evidence supports.\n"
+        "Prioritize what is explicitly visible in screenshots over generic summaries.\n\n"
         "TICKET CONTEXT (provided form data):\n"
         f"- Request ID: {ticket_data.get('requestId', 'Unknown')}\n"
         f"- Submitter Email: {ticket_data.get('userEmail', 'Unknown')}\n"
@@ -119,17 +122,19 @@ def build_ticket_prompt(ticket_data: dict[str, str], image_count: int) -> str:
         "2. Use only factual evidence from the submitted text and visible image details.\n"
         "3. Extract as many concrete facts as possible about symptoms, affected workflow, visible messages, business impact, and scope.\n"
         "4. Do not invent stack traces, APIs, database fields, or hidden system details.\n"
-        "5. system_context should identify the likely business or system area inferred from the route and complaint. If unknown, use 'unknown'.\n"
-        "6. page_context should describe the page, screen, or workflow step. If not visible or stated, use 'unknown'.\n"
-        "7. error_code must be 'unknown' unless a specific code or error string is visible or explicitly stated.\n"
-        "8. short_summary must be under 20 words and specific enough for future triage or dedup.\n"
-        "9. structured_problem should be a compact 2-4 sentence narrative of what is failing, the observed symptom, and why it matters.\n"
-        "10. severity should reflect likely operational impact: critical, high, medium, or low.\n"
-        "11. If images are provided, image_evidence must list concrete visible observations from them, including labels, banners, empty states, or broken UI details when visible.\n"
-        "12. related_issues should capture explicit duplicates, recurring hints, or closely matching symptoms only when supported by the evidence.\n"
-        "13. impact_scope and impact_assessment should capture who or what is affected and how strongly, using evidence from the submission.\n"
-        "14. data_gaps should list the missing facts that would most improve later investigation quality.\n"
-        "15. Never evaluate the quality of the submission form itself.\n"
+        "5. Read screenshots carefully and extract exact visible text when present: page titles, table headers, field labels, buttons, tabs, empty states, warning banners, validation text, toast messages, and error strings.\n"
+        "6. system_context should identify the likely business or system area inferred from the route, complaint, and visible UI. Prefer a concrete area over 'unknown' when the evidence supports it.\n"
+        "7. page_context should describe the page, screen, dialog, module, or workflow step. Use the visible screen name if present.\n"
+        "8. error_code must be 'unknown' unless a specific code or exact error string is visible or explicitly stated.\n"
+        "9. short_summary must be under 20 words and specific enough for future triage or dedup.\n"
+        "10. structured_problem should be a compact 2-4 sentence narrative of what is failing, the observed symptom, what the screenshot shows, and why it matters.\n"
+        "11. severity should reflect likely operational impact: critical, high, medium, or low.\n"
+        "12. If images are provided, image_evidence must list multiple concrete visible observations from them, not generic statements. Mention exact labels or UI states when readable.\n"
+        "13. image_evidence should cover what is present, what is missing, and what looks broken in the UI.\n"
+        "14. related_issues should capture explicit duplicates, recurring hints, or closely matching symptoms only when supported by the evidence.\n"
+        "15. impact_scope and impact_assessment should capture who or what is affected and how strongly, using evidence from the submission.\n"
+        "16. data_gaps should list the missing facts that would most improve later investigation quality.\n"
+        "17. Never evaluate the quality of the submission form itself.\n"
     )
 
 
@@ -149,6 +154,11 @@ def build_multimodal_message(ticket_data: dict[str, str], encoded_images: list[s
 
 
 async def analyze_ticket(ticket_data: dict[str, str], image_bytes_list: list[bytes]) -> dict:
+    logger.info(
+        "Starting structuring analysis for requestId=%s with %s images",
+        ticket_data.get("requestId"),
+        len(image_bytes_list),
+    )
     encoded_images = [encode_image_bytes(image_bytes) for image_bytes in image_bytes_list if image_bytes]
     message = build_multimodal_message(ticket_data, encoded_images)
 
@@ -158,6 +168,11 @@ async def analyze_ticket(ticket_data: dict[str, str], image_bytes_list: list[byt
     )
     parsed_output = await structured_model.ainvoke([message])
     normalized_output = normalize_structured_output(ticket_data, parsed_output, len(encoded_images))
+    logger.info(
+        "Structuring analysis completed for requestId=%s extractedFieldCount=%s",
+        ticket_data.get("requestId"),
+        normalized_output.get("triage_signals", {}).get("extractedFieldCount"),
+    )
 
     return {
         "model": MODEL_NAME,

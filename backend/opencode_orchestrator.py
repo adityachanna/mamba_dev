@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import subprocess
 from datetime import datetime, timedelta, timezone
@@ -18,6 +19,7 @@ from backend.db import append_ticket_status_event, find_ticket_by_request_id, ge
 from backend.embedder import build_vector_search_pipeline, embed_text
 
 load_dotenv()
+logger = logging.getLogger(__name__)
 
 
 SIMILARITY_THRESHOLD = 0.92
@@ -92,6 +94,7 @@ def retrieve_similar_tickets(
     *,
     limit: int = DEFAULT_RETRIEVAL_LIMIT,
 ) -> list[dict[str, Any]]:
+    logger.info("Running vector retrieval for requestId=%s reviewType=%s limit=%s", request_id, review_type, limit)
     query_vector = embed_text(query_text)
     pipeline = build_vector_search_pipeline(
         query_vector,
@@ -104,6 +107,7 @@ def retrieve_similar_tickets(
         if result.get("requestId") == request_id:
             continue
         filtered_results.append(result)
+    logger.info("Vector retrieval returned %s candidates for requestId=%s", len(filtered_results), request_id)
     return filtered_results
 
 
@@ -134,6 +138,7 @@ def decide_flow_with_agent(
     retrieval_limit: int = DEFAULT_RETRIEVAL_LIMIT,
     similarity_threshold: float = SIMILARITY_THRESHOLD,
 ) -> tuple[FlowDecision, list[dict[str, Any]], dict[str, Any]]:
+    logger.info("Starting RAG routing decision for requestId=%s", request_id)
     query_text = str(structured.get("embedding_text") or structured.get("short_summary") or structured.get("structured_problem") or "").strip()
     if not query_text:
         raise ValueError("Structured ticket is missing embedding_text / summary content.")
@@ -210,10 +215,17 @@ def decide_flow_with_agent(
             f"Retrieved incidents:\n{json.dumps(retrieval_artifacts['results'], ensure_ascii=True, indent=2, default=str)}"
         )
     )
+    logger.info(
+        "RAG routing decision completed for requestId=%s flow=%s matchedRequestId=%s",
+        request_id,
+        decision.flow,
+        decision.matched_request_id,
+    )
     return decision, retrieval_artifacts["results"], agent_result
 
 
 def build_repo_analysis_brief(structured: dict[str, Any], repo_dir: Path) -> str:
+    logger.info("Building repository analysis brief for repo=%s", repo_dir)
     model = get_router_model(temperature=0)
     prompt = (
         "You are preparing a repository investigation brief for a read-only planning agent.\n"
@@ -289,6 +301,7 @@ def build_opencode_prompt(ticket: dict[str, Any], structured: dict[str, Any], re
 
 
 def run_opencode_plan(opencode_bin: str, repo_dir: Path, prompt: str) -> subprocess.CompletedProcess[str]:
+    logger.info("Launching OpenCode plan for repo=%s with binary=%s", repo_dir, opencode_bin)
     return subprocess.run(
         [opencode_bin, "run", "--agent", "plan", prompt],
         cwd=repo_dir,
@@ -415,6 +428,63 @@ def update_ticket_with_opencode_report(
     )
 
 
+def update_ticket_with_opencode_error(
+    request_id: str,
+    repo_dir: Path,
+    flow_decision: FlowDecision,
+    retrieved_incidents: list[dict[str, Any]],
+    error_message: str,
+) -> None:
+    now = _utc_now()
+    update_ticket_fields(
+        request_id,
+        {
+            "workflow": {
+                "rag": {
+                    "eligible": True,
+                    "status": "completed",
+                    "decision": flow_decision.model_dump(),
+                    "evaluatedAt": now,
+                },
+                "dedup": {
+                    "eligible": True,
+                    "status": "no_match",
+                    "matchedRecordId": None,
+                    "evaluatedAt": now,
+                },
+                "rca": {
+                    "eligible": True,
+                    "status": "failed",
+                    "queuedAt": now,
+                    "startedAt": now,
+                    "completedAt": now,
+                    "summary": error_message,
+                },
+            },
+            "rca": {
+                "status": "failed",
+                "eligible": True,
+                "result": {
+                    "source": "opencode_plan",
+                    "repoDir": str(repo_dir),
+                    "flowDecision": flow_decision.model_dump(),
+                    "retrievedIncidents": retrieved_incidents,
+                    "report": None,
+                    "error": error_message,
+                    "exitCode": None,
+                    "generatedAt": now,
+                },
+            },
+        },
+    )
+    append_ticket_status_event(
+        request_id,
+        "failed",
+        "rca_failed",
+        error_message,
+    )
+
+
 def execute_rag_flow(
     request_id: str,
     *,
@@ -423,8 +493,7 @@ def execute_rag_flow(
     similarity_threshold: float = SIMILARITY_THRESHOLD,
 ) -> dict[str, Any]:
     repo_dir = (repo_dir or DEFAULT_REPO_DIR).resolve()
-    if not repo_dir.exists():
-        raise FileNotFoundError(f"Repository directory does not exist: {repo_dir}")
+    logger.info("Executing RAG flow for requestId=%s repoDir=%s", request_id, repo_dir)
 
     append_ticket_status_event(
         request_id,
@@ -460,6 +529,7 @@ def execute_rag_flow(
         )
 
     if flow_decision.flow == "reuse_existing_incident" and matched_ticket:
+        logger.info("RAG flow matched existing incident for requestId=%s matchedRequestId=%s", request_id, matched_ticket.get("requestId"))
         update_ticket_with_match(request_id, matched_ticket, flow_decision, retrieved_incidents)
         return {
             "status": "matched",
@@ -476,9 +546,29 @@ def execute_rag_flow(
         "opencode_rca",
         "RAG agent selected OpenCode RCA.",
     )
+    if not repo_dir.exists():
+        error_message = f"Repository directory does not exist: {repo_dir}"
+        logger.error("OpenCode RCA cannot start for requestId=%s because repo directory is missing: %s", request_id, repo_dir)
+        update_ticket_with_opencode_error(
+            request_id,
+            repo_dir,
+            flow_decision,
+            retrieved_incidents,
+            error_message,
+        )
+        return {
+            "status": "opencode_failed",
+            "requestId": request_id,
+            "decision": flow_decision.model_dump(),
+            "retrievedIncidents": retrieved_incidents,
+            "repoDir": str(repo_dir),
+            "error": error_message,
+        }
+    logger.info("RAG flow selected OpenCode RCA for requestId=%s", request_id)
     analysis_brief = build_repo_analysis_brief(structured, repo_dir)
     prompt = build_opencode_prompt(ticket, structured, repo_dir, analysis_brief)
     result = run_opencode_plan(opencode_bin, repo_dir, prompt)
+    logger.info("OpenCode completed for requestId=%s exitCode=%s", request_id, result.returncode)
     update_ticket_with_opencode_report(
         request_id,
         repo_dir,

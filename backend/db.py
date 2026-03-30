@@ -4,6 +4,7 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 
+import certifi
 from dotenv import load_dotenv
 from pymongo import ASCENDING, DESCENDING, MongoClient
 from pymongo.collection import Collection
@@ -41,6 +42,13 @@ def get_mongo_client() -> MongoClient:
     uri = _require_env("uri", "MONGODB_URI", "MONGO_URI")
     _MONGO_CLIENT = MongoClient(
         uri,
+        appname="mamba-ticketing",
+        tls=True,
+        tlsCAFile=certifi.where(),
+        serverSelectionTimeoutMS=int(_get_env("MONGO_SERVER_SELECTION_TIMEOUT_MS", default="8000") or "8000"),
+        connectTimeoutMS=int(_get_env("MONGO_CONNECT_TIMEOUT_MS", default="8000") or "8000"),
+        socketTimeoutMS=int(_get_env("MONGO_SOCKET_TIMEOUT_MS", default="8000") or "8000"),
+        retryWrites=True,
         server_api=ServerApi(version="1", strict=True, deprecation_errors=True),
     )
     return _MONGO_CLIENT

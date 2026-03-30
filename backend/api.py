@@ -72,14 +72,14 @@ async def startup_checks() -> None:
         DEPENDENCY_STATUS["mongo"] = {"status": "ok", "detail": "MongoDB reachable"}
     except Exception as exc:
         DEPENDENCY_STATUS["mongo"] = {"status": "error", "detail": str(exc)}
-        logger.exception("MongoDB startup check failed")
+        logger.warning("MongoDB startup check failed: %s", exc)
 
     try:
         await asyncio.to_thread(get_s3_client)
         DEPENDENCY_STATUS["s3"] = {"status": "ok", "detail": "S3 client initialized"}
     except Exception as exc:
         DEPENDENCY_STATUS["s3"] = {"status": "error", "detail": str(exc)}
-        logger.exception("S3 startup check failed")
+        logger.warning("S3 startup check failed: %s", exc)
 
 
 @app.get("/health")
@@ -382,6 +382,7 @@ async def process_ticket_background(
     storage_summary: dict[str, object],
 ) -> None:
     route = ticket_payload["primaryChoice"]
+    logger.info("Background processing started for requestId=%s route=%s", request_id, route)
 
     try:
         await asyncio.to_thread(
@@ -392,6 +393,7 @@ async def process_ticket_background(
             "Running AI analysis",
         )
         analysis = await analyze_ticket(ticket_payload, image_bytes_list)
+        logger.info("Structured analysis returned for requestId=%s", request_id)
 
         uploaded_count = int(storage_summary.get("imageCount", 0))
         if uploaded_count != len(image_bytes_list):
@@ -404,8 +406,11 @@ async def process_ticket_background(
             raise RuntimeError("AI analysis returned invalid structured output")
 
         try:
+            logger.info("Generating summary embedding for requestId=%s", request_id)
             analysis["embedding"] = await asyncio.to_thread(build_embedding_record, ticket_payload, structured)
+            logger.info("Embedding generated for requestId=%s", request_id)
         except Exception as embedding_exc:
+            logger.exception("Embedding generation failed for requestId=%s", request_id)
             analysis["embedding"] = build_failed_embedding_record(ticket_payload, structured, embedding_exc)
 
         await asyncio.to_thread(
@@ -440,17 +445,21 @@ async def process_ticket_background(
             "Submission processed successfully",
         )
         storage_summary["logArtifacts"] = [success_log]
+        logger.info("Structured output artifacts saved for requestId=%s", request_id)
 
         await asyncio.to_thread(
             update_ticket_fields,
             request_id,
             _build_analysis_update(analysis, storage_summary, image_bytes_list),
         )
+        logger.info("Ticket document updated after structuring for requestId=%s", request_id)
         await asyncio.to_thread(
             execute_rag_flow,
             request_id,
         )
+        logger.info("RAG/OpenCode flow finished for requestId=%s", request_id)
     except Exception as exc:
+        logger.exception("Background processing failed for requestId=%s", request_id)
         try:
             error_log = await asyncio.to_thread(
                 upload_log_artifact,
