@@ -295,16 +295,30 @@ const buildSummary = (data, ticket) => {
     <p>${escapeHtml(workflow?.rag?.status || "Not started")}</p>
     <strong>RAG Decision</strong>
     ${formatJsonBlock(flowDecision)}
+    <strong>RAG Agent Trace</strong>
+    ${formatJsonBlock(rca?.result?.agentMessages || workflow?.rag?.agentMessages || null)}
     <strong>Dedup Workflow</strong>
     <p>${escapeHtml(workflow?.dedup?.status || "Not started")}</p>
     <strong>Matched Incident</strong>
     <p>${escapeHtml(rca?.result?.matchedRequestId || workflow?.dedup?.matchedRecordId || "None")}</p>
+    <strong>Duplicate Linked To Original Request</strong>
+    <p>${escapeHtml(workflow?.dedup?.originalRequestId || rca?.result?.matchedRequestId || workflow?.dedup?.matchedRecordId || "None")}</p>
     <strong>Workflow Routing</strong>
     <p>${escapeHtml(workflow?.rca?.status || ticket?.rca?.status || "waiting_for_rag")}</p>
     <strong>RCA Source</strong>
     <p>${escapeHtml(rca?.result?.source || "Pending")}</p>
     <strong>OpenCode Exit Code</strong>
     <p>${escapeHtml(rca?.result?.exitCode ?? "Not available")}</p>
+    <strong>OpenCode Timeout</strong>
+    <p>${escapeHtml(rca?.result?.timedOut ? `Yes (${rca?.result?.timeoutSeconds ?? "unknown"}s)` : "No")}</p>
+    <strong>OpenCode Terminated</strong>
+    <p>${escapeHtml(rca?.result?.terminated ? "Yes" : "No")}</p>
+    <strong>OpenCode Error</strong>
+    <p>${escapeHtml(rca?.result?.error || "Not available")}</p>
+    <strong>OpenCode Plan</strong>
+    <pre class="raw-output">${escapeHtml(rca?.result?.fullPlan || rca?.result?.report || "Not available")}</pre>
+    <strong>OpenCode STDERR</strong>
+    <pre class="raw-output">${escapeHtml(rca?.result?.stderr || "Not available")}</pre>
     <strong>Status History</strong>
     ${formatStatusHistory(ticket?.statusHistory)}
     <strong>Raw Model Output</strong>
@@ -389,7 +403,7 @@ const validateForm = (data) => {
   }
 
   if (!data.reviewType) {
-    return "Select PSUR, PADER, or Literature Review.";
+    return "Select PSUR, PADER, Literature Review, or Image Studio.";
   }
 
   return "";

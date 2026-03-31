@@ -10,17 +10,13 @@ from langchain_core.messages import HumanMessage
 from langchain_google_genai import ChatGoogleGenerativeAI
 from PIL import Image, UnidentifiedImageError
 
+from backend.llm_logger import log_llm_response
+
 load_dotenv(Path(__file__).with_name(".env"))
 logger = logging.getLogger(__name__)
 
 MODEL_NAME = os.getenv("GEMINI_MODEL", os.getenv("OLLAMA_MODEL", "gemini-3.1-flash-lite-preview"))
 MAX_IMAGE_SIZE = (1024, 1024)
-SEVERITY_WEIGHTS = {
-    "critical": 40,
-    "high": 30,
-    "medium": 20,
-    "low": 10,
-}
 
 
 def get_model() -> ChatGoogleGenerativeAI:
@@ -167,6 +163,8 @@ async def analyze_ticket(ticket_data: dict[str, str], image_bytes_list: list[byt
         method="json_schema",
     )
     parsed_output = await structured_model.ainvoke([message])
+    log_llm_response("gemini_structuring", ticket_data.get("requestId"), parsed_output)
+    
     normalized_output = normalize_structured_output(ticket_data, parsed_output, len(encoded_images))
     logger.info(
         "Structuring analysis completed for requestId=%s extractedFieldCount=%s",
@@ -184,7 +182,7 @@ async def analyze_ticket(ticket_data: dict[str, str], image_bytes_list: list[byt
 
 def normalize_structured_output(ticket_data: dict[str, str], structured: dict, image_count: int) -> dict:
     severity = str(structured.get("severity") or "medium").strip().lower()
-    if severity not in SEVERITY_WEIGHTS:
+    if severity not in ["critical", "high", "medium", "low"]:
         severity = "medium"
 
     normalized = {
@@ -195,7 +193,6 @@ def normalize_structured_output(ticket_data: dict[str, str], structured: dict, i
         "page_context": str(structured.get("page_context") or "unknown").strip(),
         "error_code": str(structured.get("error_code") or "unknown").strip(),
         "severity": severity,
-        "severity_weight": SEVERITY_WEIGHTS[severity],
         "image_evidence": _clean_string_list(structured.get("image_evidence")),
         "related_issues": _clean_string_list(structured.get("related_issues")),
         "impact_scope": str(structured.get("impact_scope") or "").strip(),

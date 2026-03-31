@@ -50,8 +50,8 @@
           <div class="flow-step">
             <span class="flow-index">03</span>
             <div>
-              <strong>Queue</strong>
-              <p>The ticket is prepared for dedup and RCA if escalation is warranted.</p>
+              <strong>Route</strong>
+              <p>RAG decides reuse vs OpenCode RCA after structuring and embedding complete.</p>
             </div>
           </div>
         </div>
@@ -66,7 +66,7 @@
           </div>
           <div>
             <span>Submission Modes</span>
-            <strong>PSUR, PADER, Literature Review</strong>
+            <strong>PSUR, PADER, Literature Review, Image Studio</strong>
           </div>
         </div>
       </section>
@@ -191,7 +191,7 @@
                   <h2>Submission type</h2>
                   <p>Select the downstream review category.</p>
                 </div>
-                <div class="choice-grid three-up compact-choices" role="radiogroup" aria-labelledby="reviewChoiceLabel">
+                <div class="choice-grid four-up compact-choices" role="radiogroup" aria-labelledby="reviewChoiceLabel">
                   <span id="reviewChoiceLabel" class="sr-only">Submission type</span>
 
                   <label class="choice-card compact-card">
@@ -210,6 +210,12 @@
                     <input type="radio" name="reviewType" value="Literature Review" required>
                     <span class="choice-title">Literature Review</span>
                     <span class="choice-copy">Evidence review and synthesis route</span>
+                  </label>
+
+                  <label class="choice-card compact-card">
+                    <input type="radio" name="reviewType" value="Image Studio" required>
+                    <span class="choice-title">Image Studio</span>
+                    <span class="choice-copy">Image-focused creation and review route</span>
                   </label>
                 </div>
               </div>

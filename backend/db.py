@@ -10,7 +10,6 @@ from pymongo import ASCENDING, DESCENDING, MongoClient
 from pymongo.collection import Collection
 from pymongo.errors import DuplicateKeyError
 from pymongo.operations import SearchIndexModel
-from pymongo.server_api import ServerApi
 
 from backend.embedder import get_vector_dimensions, get_vector_index_definition
 
@@ -49,7 +48,6 @@ def get_mongo_client() -> MongoClient:
         connectTimeoutMS=int(_get_env("MONGO_CONNECT_TIMEOUT_MS", default="8000") or "8000"),
         socketTimeoutMS=int(_get_env("MONGO_SOCKET_TIMEOUT_MS", default="8000") or "8000"),
         retryWrites=True,
-        server_api=ServerApi(version="1", strict=True, deprecation_errors=True),
     )
     return _MONGO_CLIENT
 

@@ -413,6 +413,10 @@ h1 {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
+.four-up {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
 .evidence-grid {
   grid-template-columns: 1.15fr 0.85fr;
   align-items: start;
@@ -632,6 +636,10 @@ textarea {
 
 .compact-choices.three-up {
   grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.compact-choices.four-up {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
 }
 
 .choice-card {
@@ -899,8 +907,10 @@ textarea {
   .evidence-grid,
   .selection-grid,
   .three-up,
+  .four-up,
   .two-up,
-  .compact-choices.three-up {
+  .compact-choices.three-up,
+  .compact-choices.four-up {
     grid-template-columns: 1fr;
     display: grid;
   }

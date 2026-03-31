@@ -146,9 +146,11 @@ def _normalize_review_type(value: str | None) -> str | None:
         "pader": "PADER",
         "lit review": "Literature Review",
         "literature review": "Literature Review",
+        "image studio": "Image Studio",
+        "imagestudio": "Image Studio",
     }
     if normalized not in review_type_map:
-        raise HTTPException(status_code=400, detail="review_type must be PSUR, PADER, or Literature Review")
+        raise HTTPException(status_code=400, detail="review_type must be PSUR, PADER, Literature Review, or Image Studio")
     return review_type_map[normalized]
 
 
@@ -177,6 +179,7 @@ def _build_workflow_state() -> dict[str, object]:
             "eligible": False,
             "status": "not_started",
             "matchedRecordId": None,
+            "originalRequestId": None,
             "evaluatedAt": None,
         },
         "rca": {
@@ -335,6 +338,7 @@ def _build_analysis_update(analysis: dict[str, object], storage_summary: dict[st
                 "eligible": False,
                 "status": "waiting_for_rag",
                 "matchedRecordId": None,
+                "originalRequestId": None,
                 "evaluatedAt": None,
             },
             "rca": {
@@ -527,7 +531,7 @@ async def ingest_ticket(
         raise HTTPException(status_code=400, detail="issueDescription is required")
     if route not in {"JDI", "JGL"}:
         raise HTTPException(status_code=400, detail="primaryChoice must be JDI or JGL")
-    if submission_type not in {"PSUR", "PADER", "Literature Review"}:
+    if submission_type not in {"PSUR", "PADER", "Literature Review", "Image Studio"}:
         raise HTTPException(status_code=400, detail="reviewType is invalid")
 
     image_bytes_list: list[bytes] = []
