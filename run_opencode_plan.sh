@@ -55,7 +55,6 @@ Required output:
 Important style:
 - Keep the report technical and specific.
 - Prefer short evidence-backed bullets over vague prose.
-- Assume the repo may be large, so focus only on the highest-signal areas.
 EOF
 
 cat > .opencode.json <<EOF

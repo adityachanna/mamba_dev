@@ -6,20 +6,26 @@ from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
-from langchain_ollama import OllamaEmbeddings
+from openai import OpenAI
 
 load_dotenv(Path(__file__).with_name(".env"))
 
-EMBEDDING_MODEL_NAME = os.getenv("OLLAMA_EMBEDDING_MODEL", "nomic-embed-text-v2-moe:latest")
+EMBEDDING_MODEL_NAME = os.getenv("OPENROUTER_EMBEDDING_MODEL", "intfloat/e5-base-v2")
 VECTOR_INDEX_NAME = os.getenv("ATLAS_VECTOR_SEARCH_INDEX_NAME", "ticket_summary_vector_idx")
 VECTOR_PATH = "embeddings.summary.vector"
 DEFAULT_VECTOR_DIMENSIONS = int(os.getenv("EMBEDDING_DIMENSIONS", "768"))
 DEFAULT_CANDIDATES_MULTIPLIER = int(os.getenv("VECTOR_SEARCH_CANDIDATE_MULTIPLIER", "15"))
+OPENROUTER_BASE_URL = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+OPENROUTER_HTTP_REFERER = os.getenv("OPENROUTER_HTTP_REFERER", "").strip()
+OPENROUTER_TITLE = os.getenv("OPENROUTER_TITLE", "").strip()
 
 
 @lru_cache(maxsize=1)
-def get_embedding_model() -> OllamaEmbeddings:
-    return OllamaEmbeddings(model=EMBEDDING_MODEL_NAME)
+def get_openrouter_client() -> OpenAI:
+    api_key = os.getenv("OPENROUTER_API_KEY", "").strip()
+    if not api_key:
+        raise ValueError("Missing OPENROUTER_API_KEY for embedding generation.")
+    return OpenAI(base_url=OPENROUTER_BASE_URL, api_key=api_key)
 
 
 def get_vector_index_name() -> str:
@@ -54,7 +60,19 @@ def embed_text(text: str) -> list[float]:
     cleaned_text = text.strip()
     if not cleaned_text:
         raise ValueError("Cannot generate an embedding from empty text.")
-    return list(get_embedding_model().embed_query(cleaned_text))
+    extra_headers: dict[str, str] = {}
+    if OPENROUTER_HTTP_REFERER:
+        extra_headers["HTTP-Referer"] = OPENROUTER_HTTP_REFERER
+    if OPENROUTER_TITLE:
+        extra_headers["X-OpenRouter-Title"] = OPENROUTER_TITLE
+
+    response = get_openrouter_client().embeddings.create(
+        model=EMBEDDING_MODEL_NAME,
+        input=cleaned_text,
+        encoding_format="float",
+        extra_headers=extra_headers or None,
+    )
+    return list(response.data[0].embedding)
 
 
 def build_embedding_metadata(ticket_payload: dict[str, str], structured: dict[str, Any]) -> dict[str, Any]:
