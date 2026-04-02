@@ -170,8 +170,13 @@ def build_vector_search_pipeline(
                 "requestType": 1,
                 "reviewType": 1,
                 "status": 1,
+                "workflow": 1,
                 "triage": 1,
+                "analysis.structured": 1,
                 "analysis.embeddingText": 1,
+                "rca.status": 1,
+                "rca.result.github": 1,
+                "rca.result.report": 1,
                 "embeddings.summary.metadata": 1,
                 "score": {"$meta": "vectorSearchScore"},
             }

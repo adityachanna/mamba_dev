@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import logging
 import os
@@ -366,6 +367,19 @@ def find_similar_ticket(
         best_match = result
         break
     return best_match
+
+
+def _sanitize_ticket_for_storage(ticket: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(ticket, dict):
+        return None
+    sanitized = copy.deepcopy(ticket)
+    sanitized.pop("_id", None)
+    embeddings = sanitized.get("embeddings")
+    if isinstance(embeddings, dict):
+        summary = embeddings.get("summary")
+        if isinstance(summary, dict):
+            summary.pop("vector", None)
+    return sanitized
 
 
 def decide_flow_with_agent(
@@ -943,12 +957,15 @@ def run_opencode_api_rca(
 def update_ticket_with_match(
     request_id: str,
     matched_ticket: dict[str, Any],
+    matched_ticket_full: dict[str, Any] | None,
     flow_decision: FlowDecision,
     retrieved_incidents: list[dict[str, Any]],
     agent_messages: list[dict[str, Any] | str],
     github_record: dict[str, Any] | None = None,
 ) -> None:
     now = _utc_now()
+    matched_ticket_full_sanitized = _sanitize_ticket_for_storage(matched_ticket_full)
+    matched_ticket_sanitized = _sanitize_ticket_for_storage(matched_ticket) or matched_ticket
     github_result = github_record or {
         "status": "skipped",
         "mode": "comment_existing_issue",
@@ -970,6 +987,7 @@ def update_ticket_with_match(
                     "eligible": True,
                     "status": "matched",
                     "matchedRecordId": matched_ticket.get("requestId"),
+                    "originalRequestId": matched_ticket.get("requestId"),
                     "evaluatedAt": now,
                 },
                 "rca": {
@@ -990,6 +1008,22 @@ def update_ticket_with_match(
                     "matchedRequestId": matched_ticket.get("requestId"),
                     "score": matched_ticket.get("score"),
                     "retrievedIncidents": retrieved_incidents,
+                    "matchedTicketSnapshot": matched_ticket_sanitized,
+                    "matchedTicketFull": matched_ticket_full_sanitized,
+                    "originalIssue": {
+                        "requestId": (matched_ticket_full_sanitized or matched_ticket_sanitized).get("requestId"),
+                        "primaryChoice": (matched_ticket_full_sanitized or matched_ticket_sanitized).get("primaryChoice"),
+                        "requestType": (matched_ticket_full_sanitized or matched_ticket_sanitized).get("requestType"),
+                        "reviewType": (matched_ticket_full_sanitized or matched_ticket_sanitized).get("reviewType"),
+                        "status": (matched_ticket_full_sanitized or matched_ticket_sanitized).get("status"),
+                        "triage": ((matched_ticket_full_sanitized or matched_ticket_sanitized).get("triage") or {}),
+                        "analysis": {
+                            "structured": (((matched_ticket_full_sanitized or matched_ticket_sanitized).get("analysis") or {}).get("structured")),
+                            "embeddingText": (((matched_ticket_full_sanitized or matched_ticket_sanitized).get("analysis") or {}).get("embeddingText")),
+                        },
+                        "workflow": (matched_ticket_full_sanitized or matched_ticket_sanitized).get("workflow"),
+                        "rca": (matched_ticket_full_sanitized or matched_ticket_sanitized).get("rca"),
+                    },
                     "matchedMetadata": ((matched_ticket.get("embeddings") or {}).get("summary") or {}).get("metadata"),
                     "flowDecision": flow_decision.model_dump(),
                     "agentMessages": agent_messages,
@@ -1261,11 +1295,15 @@ def execute_rag_flow(
         for message in agent_result["messages"]
     ]
     matched_ticket = None
+    matched_ticket_full = None
     if flow_decision.matched_request_id:
         matched_ticket = next(
             (item for item in retrieved_incidents if item.get("requestId") == flow_decision.matched_request_id),
             None,
         )
+        # Hydrate from DB so GitHub issue metadata is always available for comment + persistence.
+        if matched_ticket and matched_ticket.get("requestId"):
+            matched_ticket_full = find_ticket_by_request_id(str(matched_ticket.get("requestId")))
 
     if flow_decision.flow == "reuse_existing_incident" and matched_ticket:
         logger.info(
@@ -1273,10 +1311,12 @@ def execute_rag_flow(
             request_id,
             matched_ticket.get("requestId"),
         )
-        github_comment_result = add_comment_to_existing_issue_from_plan(request_id, matched_ticket)
+        comment_source_ticket = matched_ticket_full or matched_ticket
+        github_comment_result = add_comment_to_existing_issue_from_plan(request_id, comment_source_ticket)
         update_ticket_with_match(
             request_id,
             matched_ticket,
+            matched_ticket_full,
             flow_decision,
             retrieved_incidents,
             agent_messages,

@@ -1,6 +1,6 @@
 from urllib.parse import unquote, urlparse
 
-from s3_upload import get_s3_client, get_bucket_name
+from s3_upload import get_s3_client
 
 # URL from Cloudflare R2. This is usually private, so direct HTTP may return 400/Authorization errors.
 url = "https://b93fe5d8a511add2140e2fe05b83e831.r2.cloudflarestorage.com/bucketprod/JDI/problems/req_8f3a21/001_Screenshot 2026-03-27 110048.png"
