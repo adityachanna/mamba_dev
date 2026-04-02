@@ -14,4 +14,8 @@ logging.basicConfig(
 
 if __name__ == "__main__":
     print("Starting uvicorn server...")
-    uvicorn.run("backend.api:app", host="127.0.0.1", port=8000, reload=True)
+    host = os.getenv("HOST", "0.0.0.0")
+    port = int(os.getenv("PORT", "4000"))
+    # Keep autoreload opt-in only for local development.
+    reload_enabled = os.getenv("UVICORN_RELOAD", "false").strip().lower() in {"1", "true", "yes", "on"}
+    uvicorn.run("backend.api:app", host=host, port=port, reload=reload_enabled)

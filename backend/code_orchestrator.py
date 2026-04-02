@@ -2,7 +2,7 @@ import os
 import json
 import time
 import requests
-from typing import Dict, Any, Optional, Tuple
+from typing import Dict, Any, Optional
 from langchain_core.tools import tool
 
 # ========================= CONFIG =========================
@@ -10,6 +10,8 @@ BASE_URL = os.getenv("OPENCODE_BASE_URL", "http://localhost:4096")
 USERNAME = os.getenv("OPENCODE_SERVER_USERNAME", "opencode")
 PASSWORD = os.getenv("OPENCODE_SERVER_PASSWORD")
 SESSION_ID_ENV_VAR = "OPENCODE_SESSION_ID"
+OPENCODE_PROVIDER_ID = os.getenv("OPENCODE_PROVIDER_ID", "anthropic")
+OPENCODE_MODEL_ID = os.getenv("OPENCODE_MODEL_ID", "claude-3-5-sonnet-latest")
 
 AUTH = (USERNAME, PASSWORD)
 
@@ -43,12 +45,14 @@ def opencode_get_or_create_session(title: str = "Error-RCA-Agent-Session") -> st
 # ========================= TOOL 3: Init Session (loads repo + AGENTS.md) =========================
 @tool
 def opencode_init_session(
-    provider_id: str = "anthropic",
-    model_id: str = "claude-3-5-sonnet-latest",
+    provider_id: Optional[str] = None,
+    model_id: Optional[str] = None,
 ) -> str:
     """Run /init so OpenCode understands your entire codebase."""
     session_id = opencode_get_or_create_session.invoke({})
-    payload = {"providerID": provider_id, "modelID": model_id}
+    provider = provider_id or OPENCODE_PROVIDER_ID
+    model = model_id or OPENCODE_MODEL_ID
+    payload = {"providerID": provider, "modelID": model}
     requests.post(f"{BASE_URL}/session/{session_id}/init", json=payload, auth=AUTH, timeout=30)
     return f"Session {session_id} initialized with AGENTS.md"
 
@@ -113,7 +117,7 @@ def opencode_export_full_context(session_id: Optional[str] = None) -> Dict[str, 
     diff = _get_json(requests.get(f"{BASE_URL}/session/{session_id}/diff", auth=AUTH))
 
     # 4. Summary
-    summary_payload = {"providerID": "anthropic", "modelID": "claude-3-5-sonnet-latest"}
+    summary_payload = {"providerID": OPENCODE_PROVIDER_ID, "modelID": OPENCODE_MODEL_ID}
     requests.post(f"{BASE_URL}/session/{session_id}/summarize", json=summary_payload, auth=AUTH)
 
     # Combine into CLI-compatible export JSON
@@ -175,17 +179,9 @@ def opencode_get_diff(session_id: Optional[str] = None) -> str:
 #     "provider_id": "anthropic",
 #     "model_id": "claude-3-5-sonnet-latest"
 # })
-import os
 from typing import TypedDict, Annotated
-from langgraph.graph import StateGraph, START, END
+from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver  # or PostgresSaver for production
-from langchain_core.tools import tool
-from opencode_tools import (                 # ← your file from previous message
-    opencode_get_or_create_session,
-    opencode_init_session,
-    opencode_send_plan_message,
-    opencode_export_full_context,
-)
 
 # ========================= STATE =========================
 class RCAState(TypedDict):
@@ -214,8 +210,8 @@ def rca_node(state: RCAState) -> RCAState:
 
     # 2. Init → AGENTS.md + full repo context
     opencode_init_session.invoke({
-        "provider_id": "anthropic",           # change to your provider
-        "model_id": "claude-3-5-sonnet-latest"
+        "provider_id": OPENCODE_PROVIDER_ID,
+        "model_id": OPENCODE_MODEL_ID,
     })
 
     # 3. Send to Plan Agent (official way per docs)
@@ -241,28 +237,23 @@ def rca_node(state: RCAState) -> RCAState:
     }
 
     return state
-# Build the graph
-graph_builder = StateGraph(RCAState)
+def build_rca_graph(vlm_structurer_node, dedup_node):
+    """Build RCA graph using caller-provided structurer and dedup nodes."""
+    graph_builder = StateGraph(RCAState)
+    graph_builder.add_node("structurer", vlm_structurer_node)
+    graph_builder.add_node("dedup", dedup_node)
+    graph_builder.add_node("rca", rca_node)
 
-# Your existing nodes
-graph_builder.add_node("structurer", vlm_structurer_node)   # Stage 1
-graph_builder.add_node("dedup", dedup_node)                 # Stage 2
-graph_builder.add_node("rca", rca_node)                     # ← this file
+    def route_after_dedup(state: RCAState):
+        return "rca" if state.get("is_new_error", True) else END
 
-# Conditional routing (exactly as you wanted)
-def route_after_dedup(state: RCAState):
-    return "rca" if state.get("is_new_error", True) else END
+    graph_builder.add_conditional_edges("dedup", route_after_dedup, ["rca", END])
+    graph_builder.add_edge("structurer", "dedup")
+    graph_builder.set_entry_point("structurer")
+    checkpointer = MemorySaver()
+    return graph_builder.compile(checkpointer=checkpointer)
 
-graph_builder.add_conditional_edges("dedup", route_after_dedup, ["rca", END])
-graph_builder.add_edge("structurer", "dedup")
-graph_builder.set_entry_point("structurer")
 
-# Persistence (recommended for production)
-checkpointer = MemorySaver()   # or PostgresSaver
-compiled_graph = graph_builder.compile(checkpointer=checkpointer)
-
-# Usage
-result = compiled_graph.invoke({
-    "structured_error": your_structured_dict,
-    "is_new_error": True
-})
+# Example usage:
+# compiled_graph = build_rca_graph(vlm_structurer_node, dedup_node)
+# result = compiled_graph.invoke({"structured_error": structured_error, "is_new_error": True})

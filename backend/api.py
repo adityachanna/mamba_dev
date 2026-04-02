@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import logging
+import os
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -51,6 +52,7 @@ app.add_middleware(
 )
 
 logger = logging.getLogger(__name__)
+RAG_LOOKBACK_DAYS = int(os.getenv("RAG_LOOKBACK_DAYS", "360"))
 DEPENDENCY_STATUS: dict[str, dict[str, str]] = {
     "mongo": {"status": "unknown", "detail": "Not checked yet"},
     "s3": {"status": "unknown", "detail": "Not checked yet"},
@@ -184,7 +186,7 @@ def _normalize_review_type(value: str | None) -> str | None:
 def _build_vector_search_filter(search_request: VectorSearchRequest) -> dict[str, Any]:
     filter_clauses: list[dict[str, Any]] = [
         {"embeddings.summary.status": "completed"},
-        {"updatedAt": {"$gte": _utc_now() - timedelta(days=60)}},
+        {"updatedAt": {"$gte": _utc_now() - timedelta(days=RAG_LOOKBACK_DAYS)}},
     ]
 
     normalized_review_type = _normalize_review_type(search_request.review_type)

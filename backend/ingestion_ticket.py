@@ -15,7 +15,7 @@ from backend.llm_logger import log_llm_response
 load_dotenv(Path(__file__).with_name(".env"))
 logger = logging.getLogger(__name__)
 
-MODEL_NAME = os.getenv("GEMINI_MODEL", os.getenv("OLLAMA_MODEL", "gemini-3.1-flash-lite-preview"))
+MODEL_NAME = os.getenv("GEMINI_MODEL", "gemini-3.1-flash-lite-preview")
 MAX_IMAGE_SIZE = (1024, 1024)
 
 

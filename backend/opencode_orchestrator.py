@@ -33,6 +33,8 @@ OPENCODE_BASE_URL = os.getenv("OPENCODE_BASE_URL", "http://localhost:4096")
 OPENCODE_SESSION_ID_ENV_VAR = "OPENCODE_SESSION_ID"
 OPENCODE_PROVIDER_ID = os.getenv("OPENCODE_PROVIDER_ID", "anthropic")
 OPENCODE_MODEL_ID = os.getenv("OPENCODE_MODEL_ID", "claude-sonnet-4-5")
+RAG_LOOKBACK_DAYS = int(os.getenv("RAG_LOOKBACK_DAYS", "360"))
+RAG_ONLY_MODE = os.getenv("RAG_ONLY_MODE", "false").strip().lower() in {"1", "true", "yes", "on"}
 
 SIMILARITY_THRESHOLD = 0.85
 DEFAULT_RETRIEVAL_LIMIT = 5
@@ -311,7 +313,7 @@ def _extract_structured_ticket(request_id: str) -> tuple[dict[str, Any], dict[st
 def _build_vector_filter(review_type: str | None) -> dict[str, Any]:
     filter_clauses: list[dict[str, Any]] = [
         {"embeddings.summary.status": "completed"},
-        {"updatedAt": {"$gte": _utc_now() - timedelta(days=60)}},
+        {"updatedAt": {"$gte": _utc_now() - timedelta(days=RAG_LOOKBACK_DAYS)}},
     ]
     normalized_review_type = _normalize_review_type(review_type)
     if normalized_review_type:
@@ -411,7 +413,7 @@ def decide_flow_with_agent(
 
     system_prompt = (
         "You are a routing agent for incident analysis.\n"
-        "You have access to a retrieval tool over recent incidents from the last 60 days, filtered to the same review type.\n"
+        f"You have access to a retrieval tool over recent incidents from the last {RAG_LOOKBACK_DAYS} days, filtered to the same review type.\n"
         "Use the tool to inspect similar incidents before deciding the flow.\n"
         "CRITICAL INSTRUCTION: Prioritize the 'Feature' and 'Error Message' over minor variations in user description.\n"
         "If the current incident affects the SAME feature (e.g., Image Resizer) and shows the SAME error message banner text, it is extremely likely to be the same underlying issue.\n"
@@ -1163,6 +1165,59 @@ def update_ticket_with_opencode_error(
     append_ticket_status_event(request_id, "failed", "rca_failed", error_message)
 
 
+def update_ticket_with_rag_no_match(
+    request_id: str,
+    flow_decision: FlowDecision,
+    retrieved_incidents: list[dict[str, Any]],
+    agent_messages: list[dict[str, Any] | str],
+) -> None:
+    now = _utc_now()
+    summary = "RAG-only mode enabled; OpenCode RCA skipped because no similar incident was matched."
+    update_ticket_fields(
+        request_id,
+        {
+            "workflow": {
+                "rag": {
+                    "eligible": True,
+                    "status": "completed",
+                    "decision": flow_decision.model_dump(),
+                    "evaluatedAt": now,
+                    "agentMessages": agent_messages,
+                },
+                "dedup": {
+                    "eligible": True,
+                    "status": "no_match",
+                    "matchedRecordId": None,
+                    "evaluatedAt": now,
+                },
+                "rca": {
+                    "eligible": False,
+                    "status": "skipped",
+                    "queuedAt": None,
+                    "startedAt": None,
+                    "completedAt": now,
+                    "summary": summary,
+                },
+            },
+            "rca": {
+                "status": "skipped",
+                "eligible": False,
+                "result": {
+                    "source": "vector_search",
+                    "matchedRequestId": None,
+                    "score": None,
+                    "retrievedIncidents": retrieved_incidents,
+                    "flowDecision": flow_decision.model_dump(),
+                    "agentMessages": agent_messages,
+                    "generatedAt": now,
+                    "summary": summary,
+                },
+            },
+        },
+    )
+    append_ticket_status_event(request_id, "completed", "rag_no_match", summary)
+
+
 # ========================= Main RAG Flow ======================================
 
 def execute_rag_flow(
@@ -1235,6 +1290,28 @@ def execute_rag_flow(
             "retrievedIncidents": retrieved_incidents,
             "agentMessages": agent_messages,
             "github": github_comment_result,
+        }
+
+    if RAG_ONLY_MODE:
+        logger.info(
+            "RAG-only mode enabled; skipping OpenCode RCA for requestId=%s",
+            request_id,
+        )
+        update_ticket_with_rag_no_match(
+            request_id,
+            flow_decision,
+            retrieved_incidents,
+            agent_messages,
+        )
+        return {
+            "status": "rag_no_match",
+            "requestId": request_id,
+            "decision": flow_decision.model_dump(),
+            "matched": None,
+            "retrievedIncidents": retrieved_incidents,
+            "agentMessages": agent_messages,
+            "opencodeSkipped": True,
+            "reason": "RAG_ONLY_MODE is enabled.",
         }
 
     append_ticket_status_event(request_id, "processing", "opencode_rca", "RAG agent selected OpenCode API RCA.")

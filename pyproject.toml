@@ -3,7 +3,7 @@ name = "mamba"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.12,<3.14"
 dependencies = [
     "boto3>=1.42.77",
     "certifi>=2025.1.31",
@@ -13,14 +13,11 @@ dependencies = [
     "langchain-google-genai>=4.2.1",
     "langchain-mongodb>=0.11.0",
     "langchain-openai>=0.3.0",
-    "langchain-ollama>=1.0.1",
-    "ollama>=0.6.1",
     "openai>=2.30.0",
     "pillow>=12.1.1",
     "pymango>=0.1.1",
     "pymongo>=4.16.0",
     "python-multipart>=0.0.20",
-    "sentence-transformers>=5.3.0",
     "uvicorn>=0.36.0",
     "langchain-openrouter>=0.2.1",
 ]
